@@ -62,8 +62,73 @@ export const getDailyVolumesV1Options: RouteOptions = {
           sales_count_clean AS "sales_count"                   
         FROM daily_volumes
       `;
+    
+    
+    let newQuery = `SELECT DISTINCT ON (to_timestamp(dv.timestamp)::date)
+    dv.collection_id,
+    dv.timestamp,
+    dv."volume",
+    dv."rank",
+    dv."floor_sell_value",
+    dv."sales_count",
+    er.day,
+    er.valid_until,
+    er.kind,
+    er.contract,
+    er.token_id,
+    er.order_id,
+    er.order_source_id_int,
+    er.maker,
+    er.price,
+    er.previous_price,
+    er.tx_hash,
+    er.tx_timestamp,
+    er.created_at,
+    er.order_currency,
+    er.order_currency_price,
+    er.order_currency_normalized_value
+  FROM daily_volumes dv
+  LEFT JOIN (
+    SELECT
+      date_trunc('day', to_timestamp(events.tx_timestamp)) AS day,
+      coalesce(
+        nullif(date_part('epoch', upper(events.order_valid_between)), 'Infinity'),
+        0
+      ) AS valid_until,
+      events.kind,
+      events.collection_id,
+      events.contract,
+      events.token_id,
+      events.order_id,
+      events.order_source_id_int,
+      events.maker,
+      events.price,
+      events.previous_price,
+      events.tx_hash,
+      to_timestamp(events.tx_timestamp) AS tx_timestamp,
+      extract(epoch from events.created_at) AS created_at,
+      order_currency,
+      order_currency_price,
+      order_currency_normalized_value,
+      ROW_NUMBER() OVER (PARTITION BY date_trunc('day', to_timestamp(events.tx_timestamp)) ORDER BY events.price) AS row_num
+    FROM collection_floor_sell_events events
+    LEFT JOIN LATERAL (
+      SELECT
+        currency AS "order_currency",
+        currency_price AS "order_currency_price",
+        currency_normalized_value AS "order_currency_normalized_value"
+      FROM orders
+      WHERE events.order_id = orders.id
+    ) o ON TRUE
+    WHERE (to_timestamp(events.tx_timestamp) >= to_timestamp($/startTimestamp/))
+      AND (to_timestamp(events.tx_timestamp) <= to_timestamp($/endTimestamp/))
+      AND (coalesce(events.price, 0) >= 0)
+      AND (events.collection_id = $/id/)
+  ) AS er
+  ON to_timestamp(dv.timestamp)::date = er.day
+  ORDER BY to_timestamp(dv.timestamp)::date DESC`
 
-    baseQuery += ` WHERE collection_id = $/id/`;
+    // baseQuery += ` WHERE collection_id = $/id/`;
 
     // We default in the code so that these values don't appear in the docs
     if (!query.startTimestamp) {
@@ -73,14 +138,14 @@ export const getDailyVolumesV1Options: RouteOptions = {
       query.endTimestamp = 9999999999;
     }
 
-    baseQuery += " AND timestamp >= $/startTimestamp/ AND timestamp <= $/endTimestamp/";
+    // baseQuery += " AND timestamp >= $/startTimestamp/ AND timestamp <= $/endTimestamp/";
 
-    baseQuery += ` ORDER BY timestamp DESC`;
+    // baseQuery += ` ORDER BY timestamp DESC`;
 
-    baseQuery += ` LIMIT $/limit/`;
+    newQuery += ` LIMIT $/limit/`;
 
     try {
-      let result = await redb.manyOrNone(baseQuery, query);
+      let result = await redb.manyOrNone(newQuery, query);
       result = result.map((r: any) => ({
         id: r.id,
         timestamp: r.timestamp,
@@ -88,6 +153,7 @@ export const getDailyVolumesV1Options: RouteOptions = {
         rank: r.rank,
         floor_sell_value: formatEth(r.floor_sell_value),
         sales_count: r.sales_count,
+        floor_price: r.price
       }));
       return { collections: result };
     } catch (error: any) {
@@ -96,3 +162,70 @@ export const getDailyVolumesV1Options: RouteOptions = {
     }
   },
 };
+
+
+/**
+ * SELECT DISTINCT ON (to_timestamp(dv.timestamp)::date)
+  dv.collection_id,
+  dv.timestamp,
+  dv."volume",
+  dv."rank",
+  dv."floor_sell_value",
+  dv."sales_count",
+  er.day,
+  er.valid_until,
+  er.kind,
+  er.contract,
+  er.token_id,
+  er.order_id,
+  er.order_source_id_int,
+  er.maker,
+  er.price,
+  er.previous_price,
+  er.tx_hash,
+  er.tx_timestamp,
+  er.created_at,
+  er.order_currency,
+  er.order_currency_price,
+  er.order_currency_normalized_value
+FROM daily_volumes dv
+LEFT JOIN (
+  SELECT
+    date_trunc('day', to_timestamp(events.tx_timestamp)) AS day,
+    coalesce(
+      nullif(date_part('epoch', upper(events.order_valid_between)), 'Infinity'),
+      0
+    ) AS valid_until,
+    events.kind,
+    events.collection_id,
+    events.contract,
+    events.token_id,
+    events.order_id,
+    events.order_source_id_int,
+    events.maker,
+    events.price,
+    events.previous_price,
+    events.tx_hash,
+    to_timestamp(events.tx_timestamp) AS tx_timestamp,
+    extract(epoch from events.created_at) AS created_at,
+    order_currency,
+    order_currency_price,
+    order_currency_normalized_value,
+    ROW_NUMBER() OVER (PARTITION BY date_trunc('day', to_timestamp(events.tx_timestamp)) ORDER BY events.price) AS row_num
+  FROM collection_floor_sell_events events
+  LEFT JOIN LATERAL (
+    SELECT
+      currency AS "order_currency",
+      currency_price AS "order_currency_price",
+      currency_normalized_value AS "order_currency_normalized_value"
+    FROM orders
+    WHERE events.order_id = orders.id
+  ) o ON TRUE
+  WHERE (to_timestamp(events.tx_timestamp) >= to_timestamp(0))
+    AND (to_timestamp(events.tx_timestamp) <= to_timestamp(9999999999))
+    AND (coalesce(events.price, 0) >= 0)
+    AND (events.collection_id = '0xabb3738f04dc2ec20f4ae4462c3d069d02ae045b')
+) AS er
+ON to_timestamp(dv.timestamp)::date = er.day
+ORDER BY to_timestamp(dv.timestamp)::date DESC
+ */

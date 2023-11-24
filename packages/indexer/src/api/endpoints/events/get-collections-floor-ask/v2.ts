@@ -78,9 +78,9 @@ export const getCollectionsFloorAskV2Options: RouteOptions = {
           }),
           floorAsk: Joi.object({
             orderId: Joi.string().allow(null),
-            contract: Joi.string().lowercase().pattern(regex.address).allow(null),
+            // contract: Joi.string().lowercase().pattern(regex.address).allow(null),
             tokenId: Joi.string().pattern(regex.number).allow(null),
-            maker: Joi.string().lowercase().pattern(regex.address).allow(null),
+            // maker: Joi.string().lowercase().pattern(regex.address).allow(null),
             price: JoiPrice.allow(null),
             validUntil: Joi.number().unsafe().allow(null),
             source: Joi.string().allow("", null),
@@ -119,44 +119,74 @@ export const getCollectionsFloorAskV2Options: RouteOptions = {
     const query = request.query as any;
 
     try {
-      let baseQuery = `
-        SELECT
-          coalesce(
-            nullif(date_part('epoch', upper(events.order_valid_between)), 'Infinity'),
-            0
-          ) AS valid_until,
-          events.id,
-          events.kind,
-          events.collection_id,
-          events.contract,
-          events.token_id,
-          events.order_id,
-          events.order_source_id_int,
-          events.maker,
-          events.price,
-          events.previous_price,
-          events.tx_hash,
-          events.tx_timestamp,
-          extract(epoch from events.created_at) AS created_at,
-          order_currency,
-          order_currency_price,
-          order_currency_normalized_value
-        FROM ${
-          query.normalizeRoyalties
-            ? "collection_normalized_floor_sell_events"
-            : query.excludeFlaggedTokens
-            ? "collection_non_flagged_floor_sell_events"
-            : "collection_floor_sell_events"
-        } events
-        LEFT JOIN LATERAL (
-          SELECT            
-            currency AS "order_currency",
-            currency_price AS "order_currency_price",
-            currency_normalized_value AS "order_currency_normalized_value"
-            FROM orders
-            WHERE events.order_id = orders.id
-        ) o ON TRUE
-      `;
+      // let baseQuery = `
+      //   SELECT
+      //     coalesce(
+      //       nullif(date_part('epoch', upper(events.order_valid_between)), 'Infinity'),
+      //       0
+      //     ) AS valid_until,
+      //     events.id,
+      //     events.kind,
+      //     events.collection_id,
+      //     events.contract,
+      //     events.token_id,
+      //     events.order_id,
+      //     events.order_source_id_int,
+      //     events.maker,
+      //     events.price,
+      //     events.previous_price,
+      //     events.tx_hash,
+      //     events.tx_timestamp,
+      //     extract(epoch from events.created_at) AS created_at,
+      //     order_currency,
+      //     order_currency_price,
+      //     order_currency_normalized_value
+      //   FROM ${
+      //     query.normalizeRoyalties
+      //       ? "collection_normalized_floor_sell_events"
+      //       : query.excludeFlaggedTokens
+      //       ? "collection_non_flagged_floor_sell_events"
+      //       : "collection_floor_sell_events"
+      //   } events
+      //   LEFT JOIN LATERAL (
+      //     SELECT            
+      //       currency AS "order_currency",
+      //       currency_price AS "order_currency_price",
+      //       currency_normalized_value AS "order_currency_normalized_value"
+      //       FROM orders
+      //       WHERE events.order_id = orders.id
+      //   ) o ON TRUE
+      // `;
+      let baseQuery = `SELECT
+      date_trunc('day', to_timestamp(events.tx_timestamp)) AS day,
+      coalesce(
+        nullif(date_part('epoch', upper(events.order_valid_between)), 'Infinity'),
+        0
+      ) AS valid_until,
+      events.kind,
+      events.collection_id,
+      events.contract,
+      events.token_id,
+      events.order_id,
+      events.order_source_id_int,
+      events.maker,
+      MIN(events.price) AS min_price, 
+      events.previous_price,
+      events.tx_hash,
+      events.tx_timestamp,
+      extract(epoch from events.created_at) AS created_at,
+      order_currency,
+      MIN(order_currency_price) AS min_order_currency_price, 
+      MIN(order_currency_normalized_value) AS min_order_currency_normalized_value
+    FROM collection_floor_sell_events events
+    LEFT JOIN LATERAL (
+      SELECT
+        currency AS "order_currency",
+        currency_price AS "order_currency_price",
+        currency_normalized_value AS "order_currency_normalized_value"
+      FROM orders
+      WHERE events.order_id = orders.id
+    ) o ON TRUE`
 
       // We default in the code so that these values don't appear in the docs
       if (!query.startTimestamp) {
@@ -193,14 +223,23 @@ export const getCollectionsFloorAskV2Options: RouteOptions = {
       }
 
       // Sorting
+      // baseQuery += `
+      //   ORDER BY
+      //     events.created_at ${query.sortDirection},
+      //     events.id ${query.sortDirection}
+      // `;
+
       baseQuery += `
-        ORDER BY
-          events.created_at ${query.sortDirection},
-          events.id ${query.sortDirection}
-      `;
+      GROUP BY day, valid_until, events.kind, events.collection_id, events.contract, events.token_id,
+  events.order_id, events.order_source_id_int, events.maker, events.previous_price,
+  events.tx_hash, events.tx_timestamp, created_at, order_currency
+ORDER BY day DESC
+      `
 
       // Pagination
       baseQuery += ` LIMIT $/limit/`;
+
+      console.log(baseQuery);
 
       const rawResult = await redb.manyOrNone(baseQuery, query);
 
@@ -218,22 +257,22 @@ export const getCollectionsFloorAskV2Options: RouteOptions = {
         },
         floorAsk: {
           orderId: r.order_id,
-          contract: r.contract ? fromBuffer(r.contract) : null,
+          // contract: r.contract ? fromBuffer(r.contract) : null,
           tokenId: r.token_id,
-          maker: r.maker ? fromBuffer(r.maker) : null,
-          price: r.price
+          // maker: r.maker ? fromBuffer(r.maker) : null,
+          price: r.min_price
             ? await getJoiPriceObject(
                 {
                   gross: {
                     amount: String(
                       query.normalizeRoyalties && r.order_currency_normalized_value
                         ? r.order_currency_normalized_value
-                        : r.order_currency_price ?? r.price
+                        : r.order_currency_price ?? r.min_price
                     ),
                     nativeAmount: String(
                       query.normalizeRoyalties && r.order_currency_normalized_value
                         ? r.order_currency_normalized_value
-                        : r.price
+                        : r.min_price
                     ),
                   },
                 },
@@ -248,7 +287,7 @@ export const getCollectionsFloorAskV2Options: RouteOptions = {
           id: r.id,
           previousPrice: r.previous_price ? formatEth(r.previous_price) : null,
           kind: r.kind,
-          txHash: r.tx_hash ? fromBuffer(r.tx_hash) : null,
+          // txHash: r.tx_hash ? fromBuffer(r.tx_hash) : null,
           txTimestamp: r.tx_timestamp ? Number(r.tx_timestamp) : null,
           createdAt: new Date(r.created_at * 1000).toISOString(),
         },
